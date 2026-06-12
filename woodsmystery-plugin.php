@@ -3,7 +3,7 @@
  * Plugin Name: Woods Mystery Plugin
  * Plugin URI: https://github.com/BetterBetterBetter/woodsmystery-plugin
  * Description: Site-specific functionality for Woods Mystery.
- * Version: 0.1.1
+ * Version: 0.1.2
  * Author: Thrice Agency
  * License: GPL v2 or later
  * Text Domain: woodsmystery-plugin
@@ -16,7 +16,7 @@ if ( ! defined( 'ABSPATH' ) ) {
 	exit;
 }
 
-define( 'WMP_SITE_PLUGIN_VERSION', '0.1.1' );
+define( 'WMP_SITE_PLUGIN_VERSION', '0.1.2' );
 define( 'WMP_SITE_PLUGIN_FILE', __FILE__ );
 define( 'WMP_SITE_PLUGIN_BASENAME', plugin_basename( __FILE__ ) );
 define( 'WMP_SITE_PLUGIN_DIR', plugin_dir_path( __FILE__ ) );

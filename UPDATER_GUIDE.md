@@ -15,8 +15,8 @@ This plugin uses the Plugin Update Checker library to enable WordPress dashboard
 
 Update these two places in `woodsmystery-plugin.php`:
 
-1. Plugin header: `Version: 0.1.1`
-2. Constant: `define( 'WMP_SITE_PLUGIN_VERSION', '0.1.1' );`
+1. Plugin header: `Version: 0.1.2`
+2. Constant: `define( 'WMP_SITE_PLUGIN_VERSION', '0.1.2' );`
 
 Use semantic versioning: `MAJOR.MINOR.PATCH`.
 
@@ -26,7 +26,7 @@ Also add a matching entry to `CHANGELOG.md`.
 
 ```bash
 git add .
-git commit -m "Bump version to 0.1.1"
+git commit -m "Bump version to 0.1.2"
 git push origin main
 ```
 
@@ -36,7 +36,7 @@ From the parent directory of the plugin folder:
 
 ```bash
 cd /Users/ryan/Sites/thrice-agency/tomwoods
-zip -r woodsmystery-plugin-0.1.1.zip woodsmystery-plugin \
+zip -r woodsmystery-plugin-0.1.2.zip woodsmystery-plugin \
   -x "woodsmystery-plugin/.git/*" \
   -x "woodsmystery-plugin/.DS_Store" \
   -x "woodsmystery-plugin/*.zip"
@@ -49,18 +49,18 @@ The ZIP should contain a top-level `woodsmystery-plugin/` folder with `woodsmyst
 Option A: GitHub web interface
 
 1. Go to `https://github.com/BetterBetterBetter/woodsmystery-plugin/releases/new`.
-2. Create a tag named `v0.1.1`.
-3. Release title: `Version 0.1.1`.
+2. Create a tag named `v0.1.2`.
+3. Release title: `Version 0.1.2`.
 4. Add release notes.
-5. Upload `woodsmystery-plugin-0.1.1.zip` as a release asset.
+5. Upload `woodsmystery-plugin-0.1.2.zip` as a release asset.
 6. Publish the release.
 
 Option B: GitHub CLI
 
 ```bash
-gh release create v0.1.1 woodsmystery-plugin-0.1.1.zip \
+gh release create v0.1.2 woodsmystery-plugin-0.1.2.zip \
   --repo BetterBetterBetter/woodsmystery-plugin \
-  --title "Version 0.1.1" \
+  --title "Version 0.1.2" \
   --notes "Release notes here."
 ```
 

@@ -34,7 +34,8 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		add_filter( 'woocommerce_order_actions', array( __CLASS__, 'add_order_action' ) );
 		add_action( 'woocommerce_order_action_woods_mystery_mailchimp_resync', array( __CLASS__, 'handle_order_resync' ) );
 
-		add_action( 'woocommerce_product_options_general_product_data', array( __CLASS__, 'render_product_field' ) );
+		add_filter( 'woocommerce_product_data_tabs', array( __CLASS__, 'add_product_data_tab' ) );
+		add_action( 'woocommerce_product_data_panels', array( __CLASS__, 'render_product_data_panel' ) );
 		add_action( 'woocommerce_admin_process_product_object', array( __CLASS__, 'save_product_field' ) );
 
 		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
@@ -55,6 +56,25 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 				'default'           => '',
 			)
 		);
+	}
+
+	public static function add_product_data_tab( $tabs ) {
+		$tabs['woods_mystery_mailchimp'] = array(
+			'label'    => __( 'Mystery Mailchimp', 'woodsmystery-plugin' ),
+			'target'   => 'woods_mystery_mailchimp_product_data',
+			'class'    => array(),
+			'priority' => 65,
+		);
+
+		return $tabs;
+	}
+
+	public static function render_product_data_panel() {
+		echo '<div id="woods_mystery_mailchimp_product_data" class="panel woocommerce_options_panel hidden">';
+		echo '<div class="options_group">';
+		self::render_product_field();
+		echo '</div>';
+		echo '</div>';
 	}
 
 	public static function render_product_field() {

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2 - 2026-06-12
+
+- Moved the Mailchimp Audience selector into a dedicated Mystery Mailchimp product data tab so it is visible for variable products.
+
 ## 0.1.1 - 2026-06-12
 
 - Replaced the product Mailchimp Audience ID text field with a Mailchimp audience dropdown populated from the API.
