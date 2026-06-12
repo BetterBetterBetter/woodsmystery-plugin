@@ -1,0 +1,53 @@
+/* Woods Mystery Plugin Admin Styles */
+
+.woodsmystery-plugin-admin .woodsmystery-status-card,
+.woodsmystery-card {
+	background: #fff;
+	border: 1px solid #ccd0d4;
+	border-radius: 4px;
+	box-shadow: 0 1px 1px rgba(0, 0, 0, 0.04);
+	margin: 20px 0;
+	padding: 20px;
+}
+
+.woodsmystery-plugin-admin .woodsmystery-status-card h2,
+.woodsmystery-card h2 {
+	margin-top: 0;
+}
+
+.woodsmystery-plugin-admin dl {
+	display: grid;
+	grid-template-columns: minmax(140px, 220px) 1fr;
+	gap: 10px 16px;
+	margin: 0;
+}
+
+.woodsmystery-plugin-admin dt {
+	font-weight: 600;
+}
+
+.woodsmystery-plugin-admin dd {
+	margin: 0;
+}
+
+.woodsmystery-status {
+	border-radius: 3px;
+	display: inline-block;
+	font-weight: 600;
+	padding: 2px 8px;
+}
+
+.woodsmystery-status--ok {
+	background: #d4edda;
+	color: #155724;
+}
+
+.woodsmystery-status--error {
+	background: #f8d7da;
+	color: #721c24;
+}
+
+.woodsmystery-status--warning {
+	background: #fff3cd;
+	color: #664d03;
+}

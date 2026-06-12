@@ -1,0 +1,7 @@
+.DS_Store
+node_modules/
+vendor/
+!plugin-update-checker/vendor/
+!plugin-update-checker/vendor/**
+*.log
+*.zip
