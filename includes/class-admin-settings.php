@@ -8,6 +8,8 @@ if ( ! defined( 'ABSPATH' ) ) {
 }
 
 class WMP_Site_Admin_Settings {
+	const OPTION_ERROR_NOTIFICATION_EMAILS = 'woodsmystery_plugin_error_notification_emails';
+
 	private $options_group = 'woodsmystery_plugin_settings';
 	private $page_slug     = 'woodsmystery-plugin';
 
@@ -31,12 +33,29 @@ class WMP_Site_Admin_Settings {
 			'woodsmystery_general'
 		);
 
+		add_settings_field(
+			self::OPTION_ERROR_NOTIFICATION_EMAILS,
+			__( 'Send Mailchimp errors to', 'woodsmystery-plugin' ),
+			array( $this, 'error_notification_emails_callback' ),
+			$this->page_slug,
+			'woodsmystery_general'
+		);
+
 		register_setting(
 			$this->options_group,
 			'woodsmystery_plugin_enabled',
 			array(
 				'sanitize_callback' => array( $this, 'sanitize_checkbox' ),
 				'default'           => '1',
+			)
+		);
+
+		register_setting(
+			$this->options_group,
+			self::OPTION_ERROR_NOTIFICATION_EMAILS,
+			array(
+				'sanitize_callback' => array( $this, 'sanitize_email_list' ),
+				'default'           => '',
 			)
 		);
 	}
@@ -95,7 +114,72 @@ class WMP_Site_Admin_Settings {
 		echo '</label>';
 	}
 
+	public function error_notification_emails_callback() {
+		$value = get_option( self::OPTION_ERROR_NOTIFICATION_EMAILS, '' );
+
+		printf(
+			'<textarea class="large-text code" rows="3" name="%1$s" id="%1$s">%2$s</textarea>',
+			esc_attr( self::OPTION_ERROR_NOTIFICATION_EMAILS ),
+			esc_textarea( $value )
+		);
+
+		echo '<p class="description">';
+		echo esc_html__( 'Enter one or more email addresses separated by commas or new lines. These recipients are notified when a Mystery Mailchimp audience sync or welcome email trigger fails.', 'woodsmystery-plugin' );
+		echo '</p>';
+	}
+
 	public function sanitize_checkbox( $value ) {
 		return '1' === $value ? '1' : '0';
+	}
+
+	public function sanitize_email_list( $value ) {
+		$emails  = preg_split( '/[\s,;]+/', (string) $value );
+		$valid   = array();
+		$invalid = array();
+
+		foreach ( $emails as $email ) {
+			$email = sanitize_email( trim( $email ) );
+
+			if ( '' === $email ) {
+				continue;
+			}
+
+			if ( is_email( $email ) ) {
+				$valid[ strtolower( $email ) ] = $email;
+				continue;
+			}
+
+			$invalid[] = $email;
+		}
+
+		if ( ! empty( $invalid ) ) {
+			add_settings_error(
+				self::OPTION_ERROR_NOTIFICATION_EMAILS,
+				'woodsmystery_invalid_error_notification_emails',
+				__( 'Some Mailchimp error notification emails were invalid and were not saved.', 'woodsmystery-plugin' ),
+				'warning'
+			);
+		}
+
+		return implode( ', ', array_values( $valid ) );
+	}
+
+	public static function get_error_notification_emails() {
+		$value  = get_option( self::OPTION_ERROR_NOTIFICATION_EMAILS, '' );
+		$emails = preg_split( '/[\s,;]+/', (string) $value );
+
+		return array_values(
+			array_unique(
+				array_filter(
+					array_map(
+						static function ( $email ) {
+							$email = sanitize_email( trim( $email ) );
+							return is_email( $email ) ? $email : '';
+						},
+						$emails
+					)
+				)
+			)
+		);
 	}
 }

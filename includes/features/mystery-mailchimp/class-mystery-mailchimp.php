@@ -9,15 +9,17 @@
 defined( 'ABSPATH' ) || exit;
 
 final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
-	const PAGE_SLUG              = 'woodsmystery-mystery-mailchimp';
-	const PRODUCT_META_LIST_ID   = '_woods_mystery_mailchimp_list_id';
-	const ORDER_META_SYNCED_AT   = '_woods_mystery_mailchimp_synced_at';
-	const ORDER_META_LISTS       = '_woods_mystery_mailchimp_lists';
-	const ORDER_META_LAST_ERROR  = '_woods_mystery_mailchimp_last_error';
-	const LEGACY_ORDER_META_SYNC = '_mc_synced';
-	const OPTION_API_KEY         = 'woods_mystery_mailchimp_api_key';
-	const LOGGER_SOURCE          = 'woods-mystery-mailchimp';
-	const LIST_CACHE_TRANSIENT   = 'woods_mystery_mailchimp_lists_cache';
+	const PAGE_SLUG                     = 'woodsmystery-mystery-mailchimp';
+	const PRODUCT_META_LIST_ID          = '_woods_mystery_mailchimp_list_id';
+	const ORDER_META_SYNCED_AT          = '_woods_mystery_mailchimp_synced_at';
+	const ORDER_META_LISTS              = '_woods_mystery_mailchimp_lists';
+	const ORDER_META_LAST_ERROR         = '_woods_mystery_mailchimp_last_error';
+	const ORDER_META_JOURNEY_TRIGGERED  = '_woods_mystery_mailchimp_journey_triggered';
+	const LEGACY_ORDER_META_SYNC        = '_mc_synced';
+	const OPTION_API_KEY                = 'woods_mystery_mailchimp_api_key';
+	const LOGGER_SOURCE                 = 'woods-mystery-mailchimp';
+	const LIST_CACHE_TRANSIENT          = 'woods_mystery_mailchimp_lists_cache';
+	const CUSTOMER_JOURNEY_TRIGGER_URL  = 'https://us5.api.mailchimp.com/3.0/customer-journeys/journeys/320/steps/1022/actions/trigger';
 
 	public function init() {
 		if ( ! class_exists( 'WooCommerce' ) ) {
@@ -254,7 +256,7 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 
 				if ( is_wp_error( $result ) ) {
 					$errors[] = sprintf(
-						'%s on audience %s: %s',
+						'Audience sync failed for %s on audience %s: %s',
 						self::mask_email( $attendee['email'] ),
 						$list_id,
 						$result->get_error_message()
@@ -268,11 +270,28 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 			return;
 		}
 
+		foreach ( $attendees as $attendee ) {
+			$result = self::maybe_trigger_customer_journey( $api_key, $attendee, $order );
+
+			if ( is_wp_error( $result ) ) {
+				$errors[] = sprintf(
+					'Welcome email trigger failed for %s: %s',
+					self::mask_email( $attendee['email'] ),
+					$result->get_error_message()
+				);
+			}
+		}
+
+		if ( ! empty( $errors ) ) {
+			self::mark_order_failed( $order, implode( '; ', $errors ) );
+			return;
+		}
+
 		$order->update_meta_data( self::ORDER_META_SYNCED_AT, gmdate( 'c' ) );
 		$order->update_meta_data( self::ORDER_META_LISTS, implode( ',', $list_ids ) );
 		$order->update_meta_data( self::LEGACY_ORDER_META_SYNC, 1 );
 		$order->delete_meta_data( self::ORDER_META_LAST_ERROR );
-		$order->add_order_note( sprintf( 'Mystery Mailchimp sync completed for audience(s): %s.', implode( ', ', $list_ids ) ) );
+		$order->add_order_note( sprintf( 'Mystery Mailchimp sync and welcome email trigger completed for audience(s): %s.', implode( ', ', $list_ids ) ) );
 		$order->save();
 
 		self::log(
@@ -357,6 +376,126 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		}
 
 		return true;
+	}
+
+	private static function maybe_trigger_customer_journey( $api_key, array $attendee, WC_Order $order ) {
+		$email = strtolower( trim( (string) $attendee['email'] ) );
+
+		if ( ! is_email( $email ) ) {
+			return new WP_Error( 'invalid_email', 'Invalid email address.' );
+		}
+
+		if ( self::journey_already_triggered( $order, $email ) ) {
+			self::log(
+				'info',
+				'Mailchimp welcome journey already triggered for order attendee',
+				array(
+					'order_id'   => $order->get_id(),
+					'email_hash' => md5( $email ),
+					'role'       => $attendee['role'],
+				)
+			);
+
+			return true;
+		}
+
+		$result = self::trigger_customer_journey( $api_key, $attendee, $order );
+
+		if ( is_wp_error( $result ) ) {
+			return $result;
+		}
+
+		self::mark_journey_triggered( $order, $email );
+
+		return true;
+	}
+
+	private static function trigger_customer_journey( $api_key, array $attendee, WC_Order $order ) {
+		$email = strtolower( trim( (string) $attendee['email'] ) );
+
+		$response = wp_remote_post(
+			self::CUSTOMER_JOURNEY_TRIGGER_URL,
+			array(
+				'timeout' => 20,
+				'headers' => array(
+					'Authorization' => 'Basic ' . base64_encode( 'user:' . $api_key ),
+					'Content-Type'  => 'application/json',
+				),
+				'body'    => wp_json_encode(
+					array(
+						'email_address' => $email,
+					)
+				),
+			)
+		);
+
+		if ( is_wp_error( $response ) ) {
+			return $response;
+		}
+
+		$status = wp_remote_retrieve_response_code( $response );
+		$body   = json_decode( wp_remote_retrieve_body( $response ), true );
+
+		self::log(
+			$status >= 200 && $status < 300 ? 'info' : 'error',
+			'Mailchimp welcome journey trigger response',
+			array(
+				'order_id'   => $order->get_id(),
+				'email_hash' => md5( $email ),
+				'role'       => $attendee['role'],
+				'status'     => $status,
+				'title'      => is_array( $body ) ? ( $body['title'] ?? '' ) : '',
+				'detail'     => is_array( $body ) ? ( $body['detail'] ?? '' ) : '',
+			)
+		);
+
+		if ( $status < 200 || $status >= 300 ) {
+			$message = is_array( $body ) ? trim( ( $body['title'] ?? 'Mailchimp journey error' ) . ': ' . ( $body['detail'] ?? '' ) ) : 'Mailchimp journey error.';
+			return new WP_Error( 'mailchimp_journey_trigger_failed', $message );
+		}
+
+		return true;
+	}
+
+	private static function journey_already_triggered( WC_Order $order, $email ) {
+		return in_array( strtolower( (string) $email ), self::get_journey_triggered_emails( $order ), true );
+	}
+
+	private static function mark_journey_triggered( WC_Order $order, $email ) {
+		$emails = self::get_journey_triggered_emails( $order );
+		$email  = strtolower( trim( (string) $email ) );
+
+		if ( ! in_array( $email, $emails, true ) ) {
+			$emails[] = $email;
+		}
+
+		$order->update_meta_data( self::ORDER_META_JOURNEY_TRIGGERED, $emails );
+	}
+
+	private static function get_journey_triggered_emails( WC_Order $order ) {
+		$value = $order->get_meta( self::ORDER_META_JOURNEY_TRIGGERED, true );
+
+		if ( is_string( $value ) ) {
+			$value = array_filter( array_map( 'trim', explode( ',', $value ) ) );
+		}
+
+		if ( ! is_array( $value ) ) {
+			return array();
+		}
+
+		return array_values(
+			array_unique(
+				array_filter(
+					array_map(
+						static function ( $email ) {
+							$email = strtolower( trim( (string) $email ) );
+							return is_email( $email ) ? $email : '';
+						},
+						$value
+					)
+				)
+			)
+		);
 	}
 
 	private static function get_order_attendees( WC_Order $order ) {
@@ -561,6 +700,8 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 	}
 
 	private static function mark_order_failed( WC_Order $order, $message ) {
+		$previous_message = (string) $order->get_meta( self::ORDER_META_LAST_ERROR, true );
+
 		$order->update_meta_data( self::ORDER_META_LAST_ERROR, $message );
 		$order->delete_meta_data( self::ORDER_META_SYNCED_AT );
 		$order->delete_meta_data( self::LEGACY_ORDER_META_SYNC );
@@ -575,6 +716,114 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 				'message'  => $message,
 			)
 		);
+
+		if ( $message !== $previous_message ) {
+			self::notify_sync_failure( $order, $message );
+		}
+	}
+
+	private static function notify_sync_failure( WC_Order $order, $message ) {
+		if ( ! class_exists( 'WMP_Site_Admin_Settings' ) ) {
+			return;
+		}
+
+		$recipients = WMP_Site_Admin_Settings::get_error_notification_emails();
+
+		if ( empty( $recipients ) ) {
+			return;
+		}
+
+		$subject = sprintf(
+			'[%s] Mystery Mailchimp sync failed for order #%s',
+			wp_specialchars_decode( get_bloginfo( 'name' ), ENT_QUOTES ),
+			$order->get_order_number()
+		);
+
+		$sent = wp_mail(
+			$recipients,
+			$subject,
+			self::build_failure_email_body( $order, $message ),
+			array( 'Content-Type: text/plain; charset=UTF-8' )
+		);
+
+		self::log(
+			$sent ? 'info' : 'error',
+			'Mystery Mailchimp failure notification email result',
+			array(
+				'order_id'        => $order->get_id(),
+				'recipient_count' => count( $recipients ),
+				'sent'            => $sent ? 1 : 0,
+			)
+		);
+	}
+
+	private static function build_failure_email_body( WC_Order $order, $message ) {
+		$lines = array(
+			sprintf( 'Mystery Mailchimp sync failed for order #%s.', $order->get_order_number() ),
+			'',
+			'Error:',
+			$message,
+			'',
+			'Order:',
+			admin_url( 'post.php?post=' . $order->get_id() . '&action=edit' ),
+			'',
+			'Billing attendee:',
+			sprintf(
+				'%s %s <%s>',
+				$order->get_billing_first_name(),
+				$order->get_billing_last_name(),
+				$order->get_billing_email()
+			),
+		);
+
+		$other_attendee = self::get_other_attendee_summary( $order );
+
+		if ( $other_attendee ) {
+			$lines[] = '';
+			$lines[] = 'Other attendee:';
+			$lines[] = $other_attendee;
+		}
+
+		$products = self::get_order_product_names( $order );
+
+		if ( ! empty( $products ) ) {
+			$lines[] = '';
+			$lines[] = 'Products:';
+
+			foreach ( $products as $product ) {
+				$lines[] = '- ' . $product;
+			}
+		}
+
+		$lines[] = '';
+		$lines[] = 'Retry instructions:';
+		$lines[] = 'Open the WooCommerce order, choose "Resync Mystery Mailchimp" from Order actions, then click Update.';
+
+		return implode( "\n", $lines );
+	}
+
+	private static function get_other_attendee_summary( WC_Order $order ) {
+		$email = trim( (string) $order->get_meta( 'other_attendee_email', true ) );
+		$first = trim( (string) $order->get_meta( 'other_attendee_first_name', true ) );
+		$last  = trim( (string) $order->get_meta( 'other_attendee_last_name', true ) );
+
+		if ( '' === $email && '' === $first && '' === $last ) {
+			return '';
+		}
+
+		return sprintf( '%s %s <%s>', $first, $last, $email );
+	}
+
+	private static function get_order_product_names( WC_Order $order ) {
+		$products = array();
+
+		foreach ( $order->get_items() as $item ) {
+			if ( $item instanceof WC_Order_Item_Product ) {
+				$products[] = $item->get_name();
+			}
+		}
+
+		return $products;
 	}
 
 	private static function log( $level, $message, array $context = array() ) {
