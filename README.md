@@ -32,7 +32,9 @@ Feature assets should live in `assets/features/{feature-name}/`. Register the fe
 
 The Mystery Mailchimp feature maps WooCommerce party products to Mailchimp audiences, validates Couple attendee fields, syncs Single/Couple attendee emails to the mapped audience when orders become processing or completed, and provides an order action to resync a failed or corrected order.
 
-Admins can manage the feature in WordPress under `Woods Mystery > Mystery Mailchimp`. A compatibility submenu is also available under `WooCommerce > Mystery Mailchimp`.
+Admins select the Mailchimp audience from the WooCommerce product edit screen. Variable product variations inherit the parent product audience mapping.
+
+Admins can manage and test the feature in WordPress under `Woods Mystery > Mystery Mailchimp`, which includes tabs for audience status and the QC SOP. A compatibility submenu is also available under `WooCommerce > Mystery Mailchimp`.
 
 ## Development
 

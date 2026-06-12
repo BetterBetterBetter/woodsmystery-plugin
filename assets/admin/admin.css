@@ -51,3 +51,21 @@
 	background: #fff3cd;
 	color: #664d03;
 }
+
+.woodsmystery-sop {
+	max-width: 860px;
+}
+
+.woodsmystery-sop h2:first-child {
+	margin-top: 0;
+}
+
+.woodsmystery-sop ol,
+.woodsmystery-sop ul {
+	list-style-position: outside;
+	margin-left: 22px;
+}
+
+.woodsmystery-sop li {
+	margin-bottom: 8px;
+}

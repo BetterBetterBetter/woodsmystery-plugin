@@ -17,6 +17,7 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 	const LEGACY_ORDER_META_SYNC = '_mc_synced';
 	const OPTION_API_KEY         = 'woods_mystery_mailchimp_api_key';
 	const LOGGER_SOURCE          = 'woods-mystery-mailchimp';
+	const LIST_CACHE_TRANSIENT   = 'woods_mystery_mailchimp_lists_cache';
 
 	public function init() {
 		if ( ! class_exists( 'WooCommerce' ) ) {
@@ -37,6 +38,7 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		add_action( 'woocommerce_admin_process_product_object', array( __CLASS__, 'save_product_field' ) );
 
 		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
+		add_action( 'update_option_' . self::OPTION_API_KEY, array( __CLASS__, 'clear_list_cache' ) );
 	}
 
 	public static function missing_woocommerce_notice() {
@@ -62,13 +64,45 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 			return;
 		}
 
-		woocommerce_wp_text_input(
+		$saved_list_id = trim( (string) get_post_meta( $post->ID, self::PRODUCT_META_LIST_ID, true ) );
+		$list_data     = self::get_mailchimp_lists( true );
+
+		if ( is_wp_error( $list_data ) ) {
+			woocommerce_wp_text_input(
+				array(
+					'id'          => 'woods_mystery_mailchimp_list_id',
+					'label'       => 'Mailchimp Audience ID',
+					'description' => 'Could not load Mailchimp audiences. Enter the audience/list ID manually. Variations inherit this from the parent product.',
+					'desc_tip'    => true,
+					'value'       => $saved_list_id,
+				)
+			);
+
+			echo '<p class="form-field"><span class="description" style="color:#b32d2e;">';
+			echo esc_html( 'Mailchimp audiences could not be loaded: ' . $list_data->get_error_message() );
+			echo '</span></p>';
+			return;
+		}
+
+		$options     = array( '' => 'Select a Mailchimp audience' );
+		$list_lookup = self::map_lists_by_id( $list_data );
+
+		foreach ( $list_data as $list ) {
+			$options[ $list['id'] ] = sprintf( '%s (%s)', $list['name'], $list['id'] );
+		}
+
+		if ( $saved_list_id && ! isset( $list_lookup[ $saved_list_id ] ) ) {
+			$options[ $saved_list_id ] = sprintf( 'Saved audience ID not found in Mailchimp (%s)', $saved_list_id );
+		}
+
+		woocommerce_wp_select(
 			array(
 				'id'          => 'woods_mystery_mailchimp_list_id',
-				'label'       => 'Mailchimp Audience ID',
-				'description' => 'Mystery Party audience/list ID. Variations inherit this from the parent product.',
+				'label'       => 'Mailchimp Audience',
+				'description' => 'Mystery Party audience/list. Variations inherit this from the parent product.',
 				'desc_tip'    => true,
-				'value'       => get_post_meta( $post->ID, self::PRODUCT_META_LIST_ID, true ),
+				'options'     => $options,
+				'value'       => $saved_list_id,
 			)
 		);
 	}
@@ -80,6 +114,10 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 
 		$list_id = sanitize_text_field( wp_unslash( $_POST['woods_mystery_mailchimp_list_id'] ) );
 		$product->update_meta_data( self::PRODUCT_META_LIST_ID, $list_id );
+	}
+
+	public static function clear_list_cache() {
+		delete_transient( self::LIST_CACHE_TRANSIENT );
 	}
 
 	public static function adjust_checkout_fields( $fields ) {
@@ -539,18 +577,49 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 	}
 
 	public static function render_admin_page() {
-		$api_key    = self::get_api_key();
-		$list_data  = $api_key ? self::get_mailchimp_lists() : new WP_Error( 'missing_api_key', 'No Mailchimp API key is configured.' );
-		$journeys   = $api_key ? self::get_mailchimp_journeys() : new WP_Error( 'missing_api_key', 'No Mailchimp API key is configured.' );
-		$products   = self::get_configured_products();
-		$list_lookup = is_wp_error( $list_data ) ? array() : self::map_lists_by_id( $list_data );
-		$journey_map = is_wp_error( $journeys ) ? array() : self::map_journeys_by_list( $journeys );
+		$active_tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : 'status';
+
+		if ( ! in_array( $active_tab, array( 'status', 'sop' ), true ) ) {
+			$active_tab = 'status';
+		}
+
+		$status_url = add_query_arg(
+			array(
+				'page' => self::PAGE_SLUG,
+				'tab'  => 'status',
+			),
+			admin_url( 'admin.php' )
+		);
+		$sop_url    = add_query_arg(
+			array(
+				'page' => self::PAGE_SLUG,
+				'tab'  => 'sop',
+			),
+			admin_url( 'admin.php' )
+		);
 		?>
-		<div class="wrap">
+		<div class="wrap woodsmystery-plugin-admin">
 			<h1>Mystery Mailchimp</h1>
 
-			<form method="post" action="options.php" style="max-width: 760px;">
-				<?php settings_fields( 'woods_mystery_mailchimp' ); ?>
+			<h2 class="nav-tab-wrapper">
+				<a class="nav-tab <?php echo 'status' === $active_tab ? 'nav-tab-active' : ''; ?>" href="<?php echo esc_url( $status_url ); ?>">Audience Status</a>
+				<a class="nav-tab <?php echo 'sop' === $active_tab ? 'nav-tab-active' : ''; ?>" href="<?php echo esc_url( $sop_url ); ?>">QC SOP</a>
+			</h2>
+
+			<?php if ( 'sop' === $active_tab ) : ?>
+				<?php self::render_sop_tab(); ?>
+			<?php else : ?>
+				<?php
+				$api_key     = self::get_api_key();
+				$list_data   = $api_key ? self::get_mailchimp_lists() : new WP_Error( 'missing_api_key', 'No Mailchimp API key is configured.' );
+				$journeys    = $api_key ? self::get_mailchimp_journeys() : new WP_Error( 'missing_api_key', 'No Mailchimp API key is configured.' );
+				$products    = self::get_configured_products();
+				$list_lookup = is_wp_error( $list_data ) ? array() : self::map_lists_by_id( $list_data );
+				$journey_map = is_wp_error( $journeys ) ? array() : self::map_journeys_by_list( $journeys );
+				?>
+
+				<form method="post" action="options.php" style="max-width: 760px;">
+					<?php settings_fields( 'woods_mystery_mailchimp' ); ?>
 				<table class="form-table" role="presentation">
 					<tr>
 						<th scope="row"><label for="<?php echo esc_attr( self::OPTION_API_KEY ); ?>">Mailchimp API key override</label></th>
@@ -624,16 +693,99 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 
 			<h2>Admin QC Flow</h2>
 			<ol>
-				<li>Confirm the party product has the correct Mailchimp Audience ID above.</li>
+				<li>Confirm the party product has the correct Mailchimp Audience above.</li>
 				<li>Confirm the Customer Journey column shows a sending journey for that audience.</li>
 				<li>Place one Single test order with a unique test email.</li>
 				<li>Place one Couple test order with two different unique test emails.</li>
 				<li>Open each order and confirm the Mystery Mailchimp order note says the sync completed.</li>
 				<li>Use the N8N verifier to confirm every test email is in the expected audience.</li>
-				<li>If needed, open the order actions dropdown and run Resync Mystery Mailchimp.</li>
-			</ol>
+					<li>If needed, open the order actions dropdown and run Resync Mystery Mailchimp.</li>
+				</ol>
+			<?php endif; ?>
 		</div>
 		<?php
+	}
+
+	private static function render_sop_tab() {
+		$sop_path = WMP_SITE_PLUGIN_DIR . 'mystery-party-mailchimp-qc.md';
+
+		if ( ! is_readable( $sop_path ) ) {
+			echo '<div class="notice notice-error inline"><p>';
+			echo esc_html__( 'The Mystery Party Mailchimp QC SOP file could not be found.', 'woodsmystery-plugin' );
+			echo '</p></div>';
+			return;
+		}
+
+		$markdown = file_get_contents( $sop_path );
+
+		if ( false === $markdown || '' === trim( $markdown ) ) {
+			echo '<div class="notice notice-warning inline"><p>';
+			echo esc_html__( 'The Mystery Party Mailchimp QC SOP file is empty.', 'woodsmystery-plugin' );
+			echo '</p></div>';
+			return;
+		}
+
+		echo '<div class="woodsmystery-card woodsmystery-sop">';
+		self::render_sop_markdown( $markdown );
+		echo '</div>';
+	}
+
+	private static function render_sop_markdown( $markdown ) {
+		$lines     = preg_split( '/\R/', (string) $markdown );
+		$list_type = '';
+
+		foreach ( $lines as $line ) {
+			$line = trim( $line );
+
+			if ( '' === $line ) {
+				self::close_sop_list( $list_type );
+				continue;
+			}
+
+			if ( preg_match( '/^(#{1,3})\s+(.+)$/', $line, $matches ) ) {
+				self::close_sop_list( $list_type );
+				$level = min( 4, strlen( $matches[1] ) + 1 );
+				printf( '<h%d>%s</h%d>', $level, esc_html( $matches[2] ), $level );
+				continue;
+			}
+
+			if ( preg_match( '/^\d+\.\s+(.+)$/', $line, $matches ) ) {
+				if ( 'ol' !== $list_type ) {
+					self::close_sop_list( $list_type );
+					echo '<ol>';
+					$list_type = 'ol';
+				}
+
+				echo '<li>' . esc_html( $matches[1] ) . '</li>';
+				continue;
+			}
+
+			if ( preg_match( '/^-\s+(.+)$/', $line, $matches ) ) {
+				if ( 'ul' !== $list_type ) {
+					self::close_sop_list( $list_type );
+					echo '<ul>';
+					$list_type = 'ul';
+				}
+
+				echo '<li>' . esc_html( $matches[1] ) . '</li>';
+				continue;
+			}
+
+			self::close_sop_list( $list_type );
+			echo '<p>' . esc_html( $line ) . '</p>';
+		}
+
+		self::close_sop_list( $list_type );
+	}
+
+	private static function close_sop_list( &$list_type ) {
+		if ( 'ol' === $list_type ) {
+			echo '</ol>';
+		} elseif ( 'ul' === $list_type ) {
+			echo '</ul>';
+		}
+
+		$list_type = '';
 	}
 
 	private static function get_configured_products() {
@@ -655,7 +807,15 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		);
 	}
 
-	private static function get_mailchimp_lists() {
+	private static function get_mailchimp_lists( $use_cache = false ) {
+		if ( $use_cache ) {
+			$cached = get_transient( self::LIST_CACHE_TRANSIENT );
+
+			if ( is_array( $cached ) ) {
+				return $cached;
+			}
+		}
+
 		$response = self::mailchimp_get( '/lists?count=100&fields=lists.id,lists.name,lists.stats.member_count' );
 
 		if ( is_wp_error( $response ) ) {
@@ -670,6 +830,10 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 				'name'         => $list['name'],
 				'member_count' => (int) ( $list['stats']['member_count'] ?? 0 ),
 			);
+		}
+
+		if ( $use_cache ) {
+			set_transient( self::LIST_CACHE_TRANSIENT, $lists, 5 * MINUTE_IN_SECONDS );
 		}
 
 		return $lists;
