@@ -9,17 +9,17 @@
 defined( 'ABSPATH' ) || exit;
 
 final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
-	const PAGE_SLUG                     = 'woodsmystery-mystery-mailchimp';
-	const PRODUCT_META_LIST_ID          = '_woods_mystery_mailchimp_list_id';
-	const ORDER_META_SYNCED_AT          = '_woods_mystery_mailchimp_synced_at';
-	const ORDER_META_LISTS              = '_woods_mystery_mailchimp_lists';
-	const ORDER_META_LAST_ERROR         = '_woods_mystery_mailchimp_last_error';
-	const ORDER_META_JOURNEY_TRIGGERED  = '_woods_mystery_mailchimp_journey_triggered';
-	const LEGACY_ORDER_META_SYNC        = '_mc_synced';
-	const OPTION_API_KEY                = 'woods_mystery_mailchimp_api_key';
-	const LOGGER_SOURCE                 = 'woods-mystery-mailchimp';
-	const LIST_CACHE_TRANSIENT          = 'woods_mystery_mailchimp_lists_cache';
-	const CUSTOMER_JOURNEY_TRIGGER_URL  = 'https://us5.api.mailchimp.com/3.0/customer-journeys/journeys/320/steps/1022/actions/trigger';
+	const PAGE_SLUG                        = 'woodsmystery-mystery-mailchimp';
+	const PRODUCT_META_LIST_ID             = '_woods_mystery_mailchimp_list_id';
+	const PRODUCT_META_JOURNEY_TRIGGER_URL = '_woods_mystery_mailchimp_journey_trigger_url';
+	const ORDER_META_SYNCED_AT             = '_woods_mystery_mailchimp_synced_at';
+	const ORDER_META_LISTS                 = '_woods_mystery_mailchimp_lists';
+	const ORDER_META_LAST_ERROR            = '_woods_mystery_mailchimp_last_error';
+	const ORDER_META_JOURNEY_TRIGGERED     = '_woods_mystery_mailchimp_journey_triggered';
+	const LEGACY_ORDER_META_SYNC           = '_mc_synced';
+	const OPTION_API_KEY                   = 'woods_mystery_mailchimp_api_key';
+	const LOGGER_SOURCE                    = 'woods-mystery-mailchimp';
+	const LIST_CACHE_TRANSIENT             = 'woods_mystery_mailchimp_lists_cache';
 
 	public function init() {
 		if ( ! class_exists( 'WooCommerce' ) ) {
@@ -41,6 +41,7 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		add_action( 'woocommerce_admin_process_product_object', array( __CLASS__, 'save_product_field' ) );
 
 		add_action( 'admin_init', array( __CLASS__, 'register_settings' ) );
+		add_action( 'admin_post_woods_mystery_mailchimp_backfill_journey', array( __CLASS__, 'handle_journey_backfill' ) );
 		add_action( 'update_option_' . self::OPTION_API_KEY, array( __CLASS__, 'clear_list_cache' ) );
 	}
 
@@ -86,8 +87,9 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 			return;
 		}
 
-		$saved_list_id = trim( (string) get_post_meta( $post->ID, self::PRODUCT_META_LIST_ID, true ) );
-		$list_data     = self::get_mailchimp_lists( true );
+		$saved_list_id     = trim( (string) get_post_meta( $post->ID, self::PRODUCT_META_LIST_ID, true ) );
+		$saved_trigger_url = trim( (string) get_post_meta( $post->ID, self::PRODUCT_META_JOURNEY_TRIGGER_URL, true ) );
+		$list_data         = self::get_mailchimp_lists( true );
 
 		if ( is_wp_error( $list_data ) ) {
 			woocommerce_wp_text_input(
@@ -99,6 +101,8 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 					'value'       => $saved_list_id,
 				)
 			);
+
+			self::render_journey_trigger_field( $saved_trigger_url );
 
 			echo '<p class="form-field"><span class="description" style="color:#b32d2e;">';
 			echo esc_html( 'Mailchimp audiences could not be loaded: ' . $list_data->get_error_message() );
@@ -127,15 +131,37 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 				'value'       => $saved_list_id,
 			)
 		);
+
+		self::render_journey_trigger_field( $saved_trigger_url );
+	}
+
+	private static function render_journey_trigger_field( $saved_trigger_url ) {
+		woocommerce_wp_text_input(
+			array(
+				'id'          => 'woods_mystery_mailchimp_journey_trigger_url',
+				'label'       => 'Customer Journey Trigger URL',
+				'description' => 'Mailchimp Customer Journey API trigger URL for this party. Variations inherit this from the parent product.',
+				'desc_tip'    => true,
+				'type'        => 'url',
+				'value'       => $saved_trigger_url,
+			)
+		);
 	}
 
 	public static function save_product_field( $product ) {
-		if ( ! $product || ! isset( $_POST['woods_mystery_mailchimp_list_id'] ) ) {
+		if ( ! $product ) {
 			return;
 		}
 
-		$list_id = sanitize_text_field( wp_unslash( $_POST['woods_mystery_mailchimp_list_id'] ) );
-		$product->update_meta_data( self::PRODUCT_META_LIST_ID, $list_id );
+		if ( isset( $_POST['woods_mystery_mailchimp_list_id'] ) ) {
+			$list_id = sanitize_text_field( wp_unslash( $_POST['woods_mystery_mailchimp_list_id'] ) );
+			$product->update_meta_data( self::PRODUCT_META_LIST_ID, $list_id );
+		}
+
+		if ( isset( $_POST['woods_mystery_mailchimp_journey_trigger_url'] ) ) {
+			$trigger_url = self::normalize_journey_trigger_url( wp_unslash( $_POST['woods_mystery_mailchimp_journey_trigger_url'] ) );
+			$product->update_meta_data( self::PRODUCT_META_JOURNEY_TRIGGER_URL, $trigger_url );
+		}
 	}
 
 	public static function clear_list_cache() {
@@ -215,6 +241,109 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		self::sync_order( $order->get_id(), true );
 	}
 
+	public static function handle_journey_backfill() {
+		if ( ! current_user_can( 'manage_woocommerce' ) ) {
+			wp_die( esc_html__( 'You do not have permission to trigger Mystery Mailchimp journeys.', 'woodsmystery-plugin' ) );
+		}
+
+		$product_id = isset( $_POST['product_id'] ) ? absint( wp_unslash( $_POST['product_id'] ) ) : 0;
+
+		check_admin_referer( 'woods_mystery_mailchimp_backfill_journey_' . $product_id );
+
+		$result = self::backfill_journey_for_product( $product_id );
+
+		self::redirect_with_backfill_result( $result );
+	}
+
+	private static function backfill_journey_for_product( $product_id ) {
+		if ( ! function_exists( 'wc_get_product' ) ) {
+			return self::build_backfill_result( 'error', 'WooCommerce products are not available.' );
+		}
+
+		$product = wc_get_product( $product_id );
+
+		if ( ! $product ) {
+			return self::build_backfill_result( 'error', 'The selected product could not be found.' );
+		}
+
+		$list_id     = trim( (string) $product->get_meta( self::PRODUCT_META_LIST_ID, true ) );
+		$trigger_url = self::normalize_journey_trigger_url( $product->get_meta( self::PRODUCT_META_JOURNEY_TRIGGER_URL, true ) );
+
+		if ( '' === $list_id ) {
+			return self::build_backfill_result( 'error', sprintf( '%s does not have a Mailchimp audience configured.', $product->get_name() ) );
+		}
+
+		if ( '' === $trigger_url ) {
+			return self::build_backfill_result( 'error', sprintf( '%s does not have a valid Customer Journey trigger URL configured.', $product->get_name() ) );
+		}
+
+		$api_key = self::get_api_key();
+
+		if ( ! $api_key ) {
+			return self::build_backfill_result( 'error', 'No Mailchimp API key is configured.' );
+		}
+
+		$emails = self::get_subscribed_member_emails( $list_id );
+
+		if ( is_wp_error( $emails ) ) {
+			return self::build_backfill_result( 'error', $emails->get_error_message() );
+		}
+
+		if ( empty( $emails ) ) {
+			return self::build_backfill_result( 'warning', sprintf( 'No subscribed members were found in the Mailchimp audience for %s.', $product->get_name() ) );
+		}
+
+		if ( function_exists( 'set_time_limit' ) ) {
+			set_time_limit( 120 );
+		}
+
+		$triggered = 0;
+		$errors    = array();
+
+		foreach ( $emails as $email ) {
+			$result = self::trigger_customer_journey_for_email(
+				$api_key,
+				$trigger_url,
+				$email,
+				array(
+					'product_id' => $product->get_id(),
+					'list_id'    => $list_id,
+					'source'     => 'manual_backfill',
+				)
+			);
+
+			if ( is_wp_error( $result ) ) {
+				$errors[] = sprintf( '%s: %s', self::mask_email( $email ), $result->get_error_message() );
+				continue;
+			}
+
+			$triggered++;
+		}
+
+		if ( ! empty( $errors ) ) {
+			return self::build_backfill_result(
+				$triggered > 0 ? 'warning' : 'error',
+				sprintf(
+					'Triggered the welcome Journey for %1$d of %2$d subscribed member(s) in %3$s. %4$d failed.',
+					$triggered,
+					count( $emails ),
+					$product->get_name(),
+					count( $errors )
+				),
+				$errors
+			);
+		}
+
+		return self::build_backfill_result(
+			'success',
+			sprintf(
+				'Triggered the welcome Journey for all %1$d subscribed member(s) in %2$s.',
+				$triggered,
+				$product->get_name()
+			)
+		);
+	}
+
 	public static function sync_order( $order_id, $force = false ) {
 		$order = wc_get_order( $order_id );
 
@@ -234,7 +363,8 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 			return;
 		}
 
-		$api_key = self::get_api_key();
+		$trigger_urls = self::get_order_trigger_urls( $order );
+		$api_key      = self::get_api_key();
 
 		if ( ! $api_key ) {
 			self::mark_order_failed( $order, 'No Mailchimp API key is configured.' );
@@ -270,15 +400,18 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 			return;
 		}
 
-		foreach ( $attendees as $attendee ) {
-			$result = self::maybe_trigger_customer_journey( $api_key, $attendee, $order );
+		foreach ( $trigger_urls as $trigger_url ) {
+			foreach ( $attendees as $attendee ) {
+				$result = self::maybe_trigger_customer_journey( $api_key, $trigger_url, $attendee, $order );
 
-			if ( is_wp_error( $result ) ) {
-				$errors[] = sprintf(
-					'Welcome email trigger failed for %s: %s',
-					self::mask_email( $attendee['email'] ),
-					$result->get_error_message()
-				);
+				if ( is_wp_error( $result ) ) {
+					$errors[] = sprintf(
+						'Welcome email trigger failed for %s using %s: %s',
+						self::mask_email( $attendee['email'] ),
+						$trigger_url,
+						$result->get_error_message()
+					);
+				}
 			}
 		}
 
@@ -291,7 +424,13 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		$order->update_meta_data( self::ORDER_META_LISTS, implode( ',', $list_ids ) );
 		$order->update_meta_data( self::LEGACY_ORDER_META_SYNC, 1 );
 		$order->delete_meta_data( self::ORDER_META_LAST_ERROR );
-		$order->add_order_note( sprintf( 'Mystery Mailchimp sync and welcome email trigger completed for audience(s): %s.', implode( ', ', $list_ids ) ) );
+
+		if ( empty( $trigger_urls ) ) {
+			$order->add_order_note( sprintf( 'Mystery Mailchimp sync completed for audience(s): %s. No Customer Journey trigger URL is configured for the purchased product(s).', implode( ', ', $list_ids ) ) );
+		} else {
+			$order->add_order_note( sprintf( 'Mystery Mailchimp sync and welcome email trigger completed for audience(s): %s.', implode( ', ', $list_ids ) ) );
+		}
+
 		$order->save();
 
 		self::log(
@@ -378,14 +517,20 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		return true;
 	}
 
-	private static function maybe_trigger_customer_journey( $api_key, array $attendee, WC_Order $order ) {
+	private static function maybe_trigger_customer_journey( $api_key, $trigger_url, array $attendee, WC_Order $order ) {
 		$email = strtolower( trim( (string) $attendee['email'] ) );
 
 		if ( ! is_email( $email ) ) {
 			return new WP_Error( 'invalid_email', 'Invalid email address.' );
 		}
 
-		if ( self::journey_already_triggered( $order, $email ) ) {
+		$trigger_url = self::normalize_journey_trigger_url( $trigger_url );
+
+		if ( ! $trigger_url ) {
+			return new WP_Error( 'missing_journey_trigger_url', 'Customer Journey trigger URL is missing or invalid.' );
+		}
+
+		if ( self::journey_already_triggered( $order, $trigger_url, $email ) ) {
 			self::log(
 				'info',
 				'Mailchimp welcome journey already triggered for order attendee',
@@ -393,28 +538,53 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 					'order_id'   => $order->get_id(),
 					'email_hash' => md5( $email ),
 					'role'       => $attendee['role'],
+					'url_hash'   => md5( $trigger_url ),
 				)
 			);
 
 			return true;
 		}
 
-		$result = self::trigger_customer_journey( $api_key, $attendee, $order );
+		$result = self::trigger_customer_journey( $api_key, $trigger_url, $attendee, $order );
 
 		if ( is_wp_error( $result ) ) {
 			return $result;
 		}
 
-		self::mark_journey_triggered( $order, $email );
+		self::mark_journey_triggered( $order, $trigger_url, $email );
 
 		return true;
 	}
 
-	private static function trigger_customer_journey( $api_key, array $attendee, WC_Order $order ) {
+	private static function trigger_customer_journey( $api_key, $trigger_url, array $attendee, WC_Order $order ) {
 		$email = strtolower( trim( (string) $attendee['email'] ) );
 
+		return self::trigger_customer_journey_for_email(
+			$api_key,
+			$trigger_url,
+			$email,
+			array(
+				'order_id' => $order->get_id(),
+				'role'     => $attendee['role'],
+			)
+		);
+	}
+
+	private static function trigger_customer_journey_for_email( $api_key, $trigger_url, $email, array $context = array() ) {
+		$email = strtolower( trim( (string) $email ) );
+
+		if ( ! is_email( $email ) ) {
+			return new WP_Error( 'invalid_email', 'Invalid email address.' );
+		}
+
+		$trigger_url = self::normalize_journey_trigger_url( $trigger_url );
+
+		if ( ! $trigger_url ) {
+			return new WP_Error( 'missing_journey_trigger_url', 'Customer Journey trigger URL is missing or invalid.' );
+		}
+
 		$response = wp_remote_post(
-			self::CUSTOMER_JOURNEY_TRIGGER_URL,
+			$trigger_url,
 			array(
 				'timeout' => 20,
 				'headers' => array(
@@ -439,13 +609,15 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		self::log(
 			$status >= 200 && $status < 300 ? 'info' : 'error',
 			'Mailchimp welcome journey trigger response',
-			array(
-				'order_id'   => $order->get_id(),
-				'email_hash' => md5( $email ),
-				'role'       => $attendee['role'],
-				'status'     => $status,
-				'title'      => is_array( $body ) ? ( $body['title'] ?? '' ) : '',
-				'detail'     => is_array( $body ) ? ( $body['detail'] ?? '' ) : '',
+			array_merge(
+				$context,
+				array(
+					'email_hash' => md5( $email ),
+					'status'     => $status,
+					'title'      => is_array( $body ) ? ( $body['title'] ?? '' ) : '',
+					'detail'     => is_array( $body ) ? ( $body['detail'] ?? '' ) : '',
+					'url_hash'   => md5( $trigger_url ),
+				)
 			)
 		);
 
@@ -457,22 +629,25 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		return true;
 	}
 
-	private static function journey_already_triggered( WC_Order $order, $email ) {
-		return in_array( strtolower( (string) $email ), self::get_journey_triggered_emails( $order ), true );
+	private static function journey_already_triggered( WC_Order $order, $trigger_url, $email ) {
+		$email = strtolower( trim( (string) $email ) );
+		$keys  = self::get_journey_triggered_keys( $order );
+
+		return in_array( self::get_journey_trigger_key( $trigger_url, $email ), $keys, true ) || in_array( $email, $keys, true );
 	}
 
-	private static function mark_journey_triggered( WC_Order $order, $email ) {
-		$emails = self::get_journey_triggered_emails( $order );
-		$email  = strtolower( trim( (string) $email ) );
+	private static function mark_journey_triggered( WC_Order $order, $trigger_url, $email ) {
+		$keys = self::get_journey_triggered_keys( $order );
+		$key  = self::get_journey_trigger_key( $trigger_url, $email );
 
-		if ( ! in_array( $email, $emails, true ) ) {
-			$emails[] = $email;
+		if ( ! in_array( $key, $keys, true ) ) {
+			$keys[] = $key;
 		}
 
-		$order->update_meta_data( self::ORDER_META_JOURNEY_TRIGGERED, $emails );
+		$order->update_meta_data( self::ORDER_META_JOURNEY_TRIGGERED, $keys );
 	}
 
-	private static function get_journey_triggered_emails( WC_Order $order ) {
+	private static function get_journey_triggered_keys( WC_Order $order ) {
 		$value = $order->get_meta( self::ORDER_META_JOURNEY_TRIGGERED, true );
 
 		if ( is_string( $value ) ) {
@@ -487,15 +662,18 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 			array_unique(
 				array_filter(
 					array_map(
-						static function ( $email ) {
-							$email = strtolower( trim( (string) $email ) );
-							return is_email( $email ) ? $email : '';
+						static function ( $key ) {
+							return sanitize_text_field( trim( (string) $key ) );
 						},
 						$value
 					)
 				)
 			)
 		);
+	}
+
+	private static function get_journey_trigger_key( $trigger_url, $email ) {
+		return md5( self::normalize_journey_trigger_url( $trigger_url ) ) . ':' . strtolower( trim( (string) $email ) );
 	}
 
 	private static function get_order_attendees( WC_Order $order ) {
@@ -558,6 +736,24 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		return array_keys( $list_ids );
 	}
 
+	private static function get_order_trigger_urls( WC_Order $order ) {
+		$trigger_urls = array();
+
+		foreach ( $order->get_items() as $item ) {
+			if ( ! $item instanceof WC_Order_Item_Product ) {
+				continue;
+			}
+
+			$trigger_url = self::get_item_trigger_url( $item );
+
+			if ( $trigger_url ) {
+				$trigger_urls[ $trigger_url ] = true;
+			}
+		}
+
+		return array_keys( $trigger_urls );
+	}
+
 	private static function get_item_list_id( WC_Order_Item_Product $item ) {
 		$ids = array_filter(
 			array(
@@ -571,6 +767,25 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 
 			if ( $list_id ) {
 				return $list_id;
+			}
+		}
+
+		return '';
+	}
+
+	private static function get_item_trigger_url( WC_Order_Item_Product $item ) {
+		$ids = array_filter(
+			array(
+				$item->get_variation_id(),
+				$item->get_product_id(),
+			)
+		);
+
+		foreach ( $ids as $id ) {
+			$trigger_url = self::normalize_journey_trigger_url( get_post_meta( $id, self::PRODUCT_META_JOURNEY_TRIGGER_URL, true ) );
+
+			if ( $trigger_url ) {
+				return $trigger_url;
 			}
 		}
 
@@ -697,6 +912,34 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		}
 
 		return substr( $api_key, $dash_position + 1 );
+	}
+
+	private static function normalize_journey_trigger_url( $url ) {
+		$url = esc_url_raw( trim( (string) $url ) );
+
+		if ( '' === $url ) {
+			return '';
+		}
+
+		$parts = wp_parse_url( $url );
+
+		if ( empty( $parts['scheme'] ) || empty( $parts['host'] ) || empty( $parts['path'] ) ) {
+			return '';
+		}
+
+		if ( 'https' !== strtolower( $parts['scheme'] ) ) {
+			return '';
+		}
+
+		if ( ! preg_match( '/(^|\.)api\.mailchimp\.com$/', strtolower( $parts['host'] ) ) ) {
+			return '';
+		}
+
+		if ( false === strpos( $parts['path'], '/3.0/customer-journeys/journeys/' ) || false === strpos( $parts['path'], '/actions/trigger' ) ) {
+			return '';
+		}
+
+		return $url;
 	}
 
 	private static function mark_order_failed( WC_Order $order, $message ) {
@@ -845,6 +1088,70 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		return substr( $local, 0, 1 ) . '***@' . $parts[1];
 	}
 
+	private static function build_backfill_result( $status, $message, array $errors = array() ) {
+		return array(
+			'status'  => $status,
+			'message' => $message,
+			'errors'  => $errors,
+		);
+	}
+
+	private static function redirect_with_backfill_result( array $result ) {
+		set_transient(
+			self::get_backfill_result_transient_key(),
+			$result,
+			5 * MINUTE_IN_SECONDS
+		);
+
+		wp_safe_redirect(
+			add_query_arg(
+				array(
+					'page' => self::PAGE_SLUG,
+					'tab'  => 'status',
+				),
+				admin_url( 'admin.php' )
+			)
+		);
+		exit;
+	}
+
+	private static function render_backfill_result_notice() {
+		$key    = self::get_backfill_result_transient_key();
+		$result = get_transient( $key );
+
+		if ( ! is_array( $result ) ) {
+			return;
+		}
+
+		delete_transient( $key );
+
+		$status  = in_array( $result['status'] ?? '', array( 'success', 'warning', 'error' ), true ) ? $result['status'] : 'info';
+		$message = (string) ( $result['message'] ?? '' );
+		$errors  = is_array( $result['errors'] ?? null ) ? $result['errors'] : array();
+
+		printf( '<div class="notice notice-%s is-dismissible"><p>%s</p>', esc_attr( $status ), esc_html( $message ) );
+
+		if ( ! empty( $errors ) ) {
+			echo '<ul>';
+
+			foreach ( array_slice( $errors, 0, 10 ) as $error ) {
+				echo '<li>' . esc_html( $error ) . '</li>';
+			}
+
+			if ( count( $errors ) > 10 ) {
+				printf( '<li>%s</li>', esc_html( sprintf( '%d additional error(s) omitted.', count( $errors ) - 10 ) ) );
+			}
+
+			echo '</ul>';
+		}
+
+		echo '</div>';
+	}
+
+	private static function get_backfill_result_transient_key() {
+		return 'woods_mystery_mailchimp_backfill_result_' . get_current_user_id();
+	}
+
 	public static function render_admin_page() {
 		$active_tab = isset( $_GET['tab'] ) ? sanitize_key( wp_unslash( $_GET['tab'] ) ) : 'status';
 
@@ -869,6 +1176,8 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 		?>
 		<div class="wrap woodsmystery-plugin-admin">
 			<h1>Mystery Mailchimp</h1>
+
+			<?php self::render_backfill_result_notice(); ?>
 
 			<h2 class="nav-tab-wrapper">
 				<a class="nav-tab <?php echo 'status' === $active_tab ? 'nav-tab-active' : ''; ?>" href="<?php echo esc_url( $status_url ); ?>">Audience Status</a>
@@ -902,7 +1211,7 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 			</form>
 
 			<h2>Configured Party Products</h2>
-			<p>Set the Mailchimp Audience ID on the WooCommerce product edit screen. Single and Couple variations inherit the parent product value.</p>
+			<p>Set the Mailchimp Audience ID and Customer Journey Trigger URL on the WooCommerce product edit screen. Single and Couple variations inherit the parent product values.</p>
 
 			<?php if ( is_wp_error( $list_data ) ) : ?>
 				<div class="notice notice-warning inline"><p><?php echo esc_html( $list_data->get_error_message() ); ?></p></div>
@@ -920,17 +1229,20 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 						<th>Audience ID</th>
 						<th>Mailchimp Audience</th>
 						<th>Customer Journey</th>
+						<th>Trigger URL</th>
+						<th>Manual Trigger</th>
 					</tr>
 				</thead>
 				<tbody>
 					<?php if ( empty( $products ) ) : ?>
-						<tr><td colspan="5">No party products have a Mailchimp Audience ID yet.</td></tr>
+						<tr><td colspan="7">No party products have a Mailchimp Audience ID yet.</td></tr>
 					<?php else : ?>
 						<?php foreach ( $products as $product ) : ?>
 							<?php
-							$list_id = $product->get_meta( self::PRODUCT_META_LIST_ID, true );
-							$list    = $list_lookup[ $list_id ] ?? null;
-							$journey = $journey_map[ $list_id ] ?? null;
+							$list_id     = $product->get_meta( self::PRODUCT_META_LIST_ID, true );
+							$trigger_url = self::normalize_journey_trigger_url( $product->get_meta( self::PRODUCT_META_JOURNEY_TRIGGER_URL, true ) );
+							$list        = $list_lookup[ $list_id ] ?? null;
+							$journey     = $journey_map[ $list_id ] ?? null;
 							?>
 							<tr>
 								<td><a href="<?php echo esc_url( get_edit_post_link( $product->get_id() ) ); ?>"><?php echo esc_html( $product->get_name() ); ?></a></td>
@@ -954,6 +1266,35 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 									}
 									?>
 								</td>
+								<td>
+									<?php if ( $trigger_url ) : ?>
+										<code><?php echo esc_html( $trigger_url ); ?></code>
+									<?php else : ?>
+										<strong style="color:#b32d2e;">Not configured</strong>
+									<?php endif; ?>
+								</td>
+								<td>
+									<?php if ( $list_id && $trigger_url ) : ?>
+										<form method="post" action="<?php echo esc_url( admin_url( 'admin-post.php' ) ); ?>">
+											<input type="hidden" name="action" value="woods_mystery_mailchimp_backfill_journey">
+											<input type="hidden" name="product_id" value="<?php echo esc_attr( $product->get_id() ); ?>">
+											<?php wp_nonce_field( 'woods_mystery_mailchimp_backfill_journey_' . $product->get_id() ); ?>
+											<?php
+											submit_button(
+												'Trigger audience',
+												'secondary small',
+												'submit',
+												false,
+												array(
+													'onclick' => "return confirm('This will trigger the configured Mailchimp Customer Journey for every subscribed member in this audience. Continue?');",
+												)
+											);
+											?>
+										</form>
+									<?php else : ?>
+										<span class="description">Configure an audience and trigger URL first.</span>
+									<?php endif; ?>
+								</td>
 							</tr>
 						<?php endforeach; ?>
 					<?php endif; ?>
@@ -968,8 +1309,9 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 				<li>Place one Couple test order with two different unique test emails.</li>
 				<li>Open each order and confirm the Mystery Mailchimp order note says the sync completed.</li>
 				<li>Use the N8N verifier to confirm every test email is in the expected audience.</li>
-					<li>If needed, open the order actions dropdown and run Resync Mystery Mailchimp.</li>
-				</ol>
+				<li>If needed, open the order actions dropdown and run Resync Mystery Mailchimp.</li>
+				<li>If existing audience members missed the welcome email, use Trigger audience for the configured product above.</li>
+			</ol>
 			<?php endif; ?>
 		</div>
 		<?php
@@ -1074,6 +1416,46 @@ final class WMP_Mystery_Mailchimp implements WMP_Site_Feature {
 				'order'      => 'ASC',
 			)
 		);
+	}
+
+	private static function get_subscribed_member_emails( $list_id ) {
+		$list_id = trim( (string) $list_id );
+
+		if ( '' === $list_id ) {
+			return new WP_Error( 'missing_list_id', 'Mailchimp audience ID is missing.' );
+		}
+
+		$emails = array();
+		$count  = 1000;
+		$offset = 0;
+
+		do {
+			$response = self::mailchimp_get(
+				sprintf(
+					'/lists/%s/members?status=subscribed&count=%d&offset=%d&fields=members.email_address,total_items',
+					rawurlencode( $list_id ),
+					$count,
+					$offset
+				)
+			);
+
+			if ( is_wp_error( $response ) ) {
+				return $response;
+			}
+
+			foreach ( $response['members'] ?? array() as $member ) {
+				$email = strtolower( trim( (string) ( $member['email_address'] ?? '' ) ) );
+
+				if ( is_email( $email ) ) {
+					$emails[ $email ] = true;
+				}
+			}
+
+			$total_items = (int) ( $response['total_items'] ?? count( $emails ) );
+			$offset     += $count;
+		} while ( $offset < $total_items );
+
+		return array_keys( $emails );
 	}
 
 	private static function get_mailchimp_lists( $use_cache = false ) {
